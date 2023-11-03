@@ -7,8 +7,12 @@ import (
 	"encoding/gob"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"os"
+
+	"net/http"
+	_ "net/http/pprof" // Note the underscore, which means import for side effects
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -128,6 +132,12 @@ func receiveFile(conn *net.UDPConn, destinationFile string, encryptionKey []byte
 }
 
 func main() {
+	go func() {
+		// Start a HTTP server that will serve the pprof endpoints.
+		// Do not expose this in a production environment; it's only for profiling purposes.
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+
 	// Setup UDP listener
 	addr := net.UDPAddr{
 		Port: 12345, // Replace with your listening port

@@ -7,11 +7,15 @@ import (
 	"crypto/rand"
 	"encoding/gob"
 	"io"
+	"log"
 	"net"
 	"os"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+
+	"net/http"
+	_ "net/http/pprof" // Note the underscore, which means import for side effects
 )
 
 const (
@@ -129,6 +133,13 @@ func sendFile(conn *net.UDPConn, addr *net.UDPAddr, filename string, encryptionK
 }
 
 func main() {
+	// save current time for calculating total time taken
+	start := time.Now()
+	go func() {
+		// Start a HTTP server that will serve the pprof endpoints.
+		// Do not expose this in a production environment; it's only for profiling purposes.
+		log.Println(http.ListenAndServe("localhost:6061", nil))
+	}()
 	serverAddr := "localhost:12345" // The address of the receiver
 	udpAddr, err := net.ResolveUDPAddr("udp", serverAddr)
 	if err != nil {
@@ -158,4 +169,8 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	// Calculate total time taken
+	elapsed := time.Since(start)
+	log.Printf("Total time taken: %s", elapsed)
 }
