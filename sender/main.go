@@ -5,7 +5,8 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"encoding/gob"
+	"encoding/binary"
+	"encoding/json"
 	"io"
 	"log"
 	"net"
@@ -21,6 +22,8 @@ import (
 const (
 	MAX_PACKET_SIZE = 1024 // Adjust based on your network's MTU
 	ACK_MSG         = "ACK"
+	maxBatchSize    = 1400 // to stay under the typical MTU
+	maxBatchPackets = 10   // max number of packets before sending
 )
 
 // Packet represents the data structure to send over the network
@@ -28,6 +31,10 @@ type Packet struct {
 	SequenceNumber int
 	Data           []byte
 }
+
+// type PacketHeader struct {
+// 	Size int
+// }
 
 func encryptData(data []byte, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
@@ -61,11 +68,33 @@ func compressWithZstd(data []byte) ([]byte, error) {
 
 func serialize(packet Packet) ([]byte, error) {
 	var buf bytes.Buffer
-	encoder := gob.NewEncoder(&buf)
-	err := encoder.Encode(packet)
+
+	// Serialize packet data using JSON
+	packetData, err := json.Marshal(packet)
 	if err != nil {
 		return nil, err
 	}
+
+	// Log the size of the JSON serialized data
+	// log.Printf("JSON serialized data size: %d bytes\n", len(packetData))
+
+	// Write the size of the JSON serialized packet data in big-endian format
+	packetSize := uint32(len(packetData))
+	if err := binary.Write(&buf, binary.BigEndian, packetSize); err != nil {
+		return nil, err
+	}
+
+	// Log the size of the packet header
+	// log.Printf("Packet header size: %d bytes\n", 4) // Size of uint32
+
+	// Write the actual packet data
+	if _, err := buf.Write(packetData); err != nil {
+		return nil, err
+	}
+
+	// Log the total size of the serialized packet
+	// log.Printf("Total serialized packet size: %d bytes\n", buf.Len())
+
 	return buf.Bytes(), nil
 }
 
@@ -78,6 +107,18 @@ func sendFile(conn *net.UDPConn, addr *net.UDPAddr, filename string, encryptionK
 
 	buffer := make([]byte, MAX_PACKET_SIZE)
 	sequenceNumber := 1
+	var batch []byte
+	var batchCount int
+
+	sendBatch := func() error {
+		if len(batch) > 0 {
+			_, err := conn.WriteToUDP(batch, addr)
+			batch = batch[:0] // Reset the batch
+			batchCount = 0
+			return err
+		}
+		return nil
+	}
 
 	for {
 		bytesRead, err := file.Read(buffer)
@@ -89,15 +130,25 @@ func sendFile(conn *net.UDPConn, addr *net.UDPAddr, filename string, encryptionK
 		}
 		fileChunk := buffer[:bytesRead]
 
+		// Logging the size of the file chunk before encryption
+		// log.Printf("File chunk size (before encryption): %d bytes\n", len(fileChunk))
+
 		// Encrypt and then compress the chunk of data
 		encryptedChunk, err := encryptData(fileChunk, encryptionKey)
 		if err != nil {
 			return err
 		}
+
+		// Logging the size after encryption and before compression
+		// log.Printf("Encrypted chunk size (before compression): %d bytes\n", len(encryptedChunk))
+
 		compressedChunk, err := compressWithZstd(encryptedChunk)
 		if err != nil {
 			return err
 		}
+
+		// Logging the size after compression
+		// log.Printf("Compressed chunk size: %d bytes\n", len(compressedChunk))
 
 		// Create a packet and serialize it
 		packet := Packet{
@@ -109,27 +160,27 @@ func sendFile(conn *net.UDPConn, addr *net.UDPAddr, filename string, encryptionK
 			return err
 		}
 
-		// Send the serialized packet
-		_, err = conn.WriteToUDP(serializedPacket, addr)
-		if err != nil {
-			return err
+		// Logging the size of the serialized packet
+		// log.Printf("Serialized packet size: %d bytes\n", len(serializedPacket))
+
+		// Accumulate the packet in the batch
+		if len(batch)+len(serializedPacket) > maxBatchSize || batchCount >= maxBatchPackets {
+			if err := sendBatch(); err != nil {
+				return err
+			}
 		}
+		batch = append(batch, serializedPacket...)
+		batchCount++
 
 		// Wait for acknowledgment before sending the next packet
-		ackBuffer := make([]byte, len(ACK_MSG)+10)
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		_, _, err = conn.ReadFromUDP(ackBuffer)
-		if err != nil {
-			// Handle the timeout or error, possibly resending the packet
-			// For the example, let's just retry without backoff (not recommended for production)
-			continue
-		}
+		// ... (acknowledgment code would need to be adjusted to handle batches)
 
 		// Increment the sequence number for the next packet
 		sequenceNumber++
 	}
 
-	return nil
+	// Send any remaining batched data
+	return sendBatch()
 }
 
 func main() {
