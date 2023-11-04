@@ -6,10 +6,15 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/gob"
+	"fmt"
 	"io"
+	"log"
 	"net"
+	"net/http"
 	"os"
 	"time"
+
+	_ "net/http/pprof" // Import for side effects
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -130,6 +135,12 @@ func sendFile(conn *net.UDPConn, addr *net.UDPAddr, filename string, encryptionK
 }
 
 func main() {
+	//pprof
+	go func() {
+		// Start a HTTP server that will serve the pprof endpoints.
+		log.Println(http.ListenAndServe("localhost:6061", nil))
+	}()
+
 	serverAddr := "localhost:12345" // The address of the receiver
 	udpAddr, err := net.ResolveUDPAddr("udp", serverAddr)
 	if err != nil {
@@ -148,15 +159,22 @@ func main() {
 	defer conn.Close()
 
 	// Use the same key as the receiver for AES encryption
-	encryptionKey := []byte("12345678901234567890123456789012") // 32 bytes for AES-256
+	encryptionKey := []byte("1234567890123456") // 32 bytes for AES-256
 
 	if len(os.Args) < 2 {
 		panic("Please provide a filename to send")
 	}
 	fienameFromArgs := os.Args[1]
 
+	//save current time to calculate time taken
+	start := time.Now()
+
 	err = sendFile(conn, udpAddr, fienameFromArgs, encryptionKey)
 	if err != nil {
 		panic(err)
 	}
+
+	//calculate time taken
+	elapsed := time.Since(start)
+	fmt.Println("Time taken: ", elapsed)
 }

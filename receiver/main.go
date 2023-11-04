@@ -7,8 +7,12 @@ import (
 	"encoding/gob"
 	"errors"
 	"io"
+	"log"
 	"net"
+	"net/http"
 	"os"
+
+	_ "net/http/pprof" // Import for side effects
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -128,6 +132,12 @@ func receiveFile(conn *net.UDPConn, destinationFile string, encryptionKey []byte
 }
 
 func main() {
+	//pprof
+	go func() {
+		// Start a HTTP server that will serve the pprof endpoints.
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+
 	// Setup UDP listener
 	addr := net.UDPAddr{
 		Port: 12345, // Replace with your listening port
@@ -140,7 +150,7 @@ func main() {
 	defer conn.Close()
 
 	// Use a key for AES decryption (must match the sender's key)
-	encryptionKey := []byte("12345678901234567890123456789012") // Must be 16, 24, or 32 bytes long
+	encryptionKey := []byte("1234567890123456") // Must be 16, 24, or 32 bytes long
 
 	// Call receiveFile to start receiving data
 	err = receiveFile(conn, "output.txt", encryptionKey)
