@@ -66,7 +66,7 @@ Contributing
 Contributions are welcome! Please fork the project, include your changes, and submit a pull request for review.
 
 ## License
-Specify your license here, or state that the project is in the public domain.
+MIT Licence
 
 ## Acknowledgements
 The Go community for the comprehensive libraries and support.
