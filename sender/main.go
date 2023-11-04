@@ -46,7 +46,8 @@ func encryptData(data []byte, key []byte) ([]byte, error) {
 }
 
 func compressWithZstd(data []byte) ([]byte, error) {
-	encoder, err := zstd.NewWriter(nil)
+	// fast compression level
+	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
 	if err != nil {
 		return nil, err
 	}
