@@ -5,142 +5,106 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/gob"
-	"errors"
+	"fmt"
 	"io"
-	"log"
 	"net"
-	"net/http"
 	"os"
-
-	_ "net/http/pprof" // Import for side effects
+	"sync"
 
 	"github.com/klauspost/compress/zstd"
 )
 
 const (
-	MAX_PACKET_SIZE = 1024 // Same as in sender
+	MAX_PACKET_SIZE = 1024
 	ACK_MSG         = "ACK"
+	SHARD_SIZE      = 65536 // Must be the same as in the sender
+	START_PORT      = 30000 // Must be the same as in the sender
+	TOTAL_SHARDS    = 2     // Adjust based on expected number of shards
 )
 
-// Packet structure must be the same as in sender
 type Packet struct {
 	SequenceNumber int
 	Data           []byte
 }
 
-// decryptData decrypts the data using AES
-func decryptData(encrypted []byte, key []byte) ([]byte, error) {
+func decryptData(data []byte, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(encrypted) < aes.BlockSize {
-		return nil, errors.New("ciphertext too short")
-	}
+	iv := data[:aes.BlockSize]
+	data = data[aes.BlockSize:]
 
-	// The IV is the first block of bytes
-	iv := encrypted[:aes.BlockSize]
-	encrypted = encrypted[aes.BlockSize:]
-
-	// CFB decrypter
 	stream := cipher.NewCFBDecrypter(block, iv)
-	decrypted := make([]byte, len(encrypted))
-	stream.XORKeyStream(decrypted, encrypted)
+	decrypted := make([]byte, len(data))
+	stream.XORKeyStream(decrypted, data)
 
 	return decrypted, nil
 }
 
-// decompressWithZstd decompresses data using zstd
 func decompressWithZstd(data []byte) ([]byte, error) {
-	decoder, err := zstd.NewReader(bytes.NewReader(data))
+	decoder, err := zstd.NewReader(nil)
 	if err != nil {
 		return nil, err
 	}
 	defer decoder.Close()
 
-	decompressed, err := io.ReadAll(decoder)
-	if err != nil {
-		return nil, err
-	}
-
-	return decompressed, nil
+	return decoder.DecodeAll(data, nil)
 }
 
-// deserialize converts a byte slice into a Packet struct
 func deserialize(data []byte) (Packet, error) {
 	var packet Packet
 	buf := bytes.NewBuffer(data)
 	decoder := gob.NewDecoder(buf)
 	err := decoder.Decode(&packet)
-	if err != nil {
-		return Packet{}, err
-	}
-	return packet, nil
+	return packet, err
 }
 
-// receiveFile listens for incoming file data over UDP
-func receiveFile(conn *net.UDPConn, destinationFile string, encryptionKey []byte) error {
-	file, err := os.Create(destinationFile)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
+// func receiveShard(port int, wg *sync.WaitGroup, encryptionKey []byte, shardDataChan chan<- []byte) {
+// 	defer wg.Done()
 
-	for {
-		buffer := make([]byte, MAX_PACKET_SIZE+1024) // Slightly larger than expected to accommodate additional data
-		n, addr, err := conn.ReadFromUDP(buffer)
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			break // No more data to read
-		}
+// 	addr := net.UDPAddr{
+// 		Port: port,
+// 		IP:   net.ParseIP("0.0.0.0"),
+// 	}
+// 	conn, err := net.ListenUDP("udp", &addr)
+// 	if err != nil {
+// 		panic(err)
+// 	}
+// 	defer conn.Close()
 
-		// Deserialize the packet
-		packet, err := deserialize(buffer[:n])
-		if err != nil {
-			return err
-		}
+// 	var fileData []byte
+// 	for {
+// 		buffer := make([]byte, MAX_PACKET_SIZE)
+// 		n, _, err := conn.ReadFromUDP(buffer)
+// 		if err != nil {
+// 			if err == io.EOF {
+// 				break // End of shard
+// 			}
+// 			panic(err) // or handle error differently
+// 		}
 
-		// Decompress the data
-		decompressedData, err := decompressWithZstd(packet.Data)
-		if err != nil {
-			return err
-		}
+// 		packet, _ := deserialize(buffer[:n])
+// 		decryptedChunk, _ := decryptData(packet.Data, encryptionKey)
+// 		decompressedChunk, _ := decompressWithZstd(decryptedChunk)
 
-		// Decrypt the data
-		decryptedData, err := decryptData(decompressedData, encryptionKey)
-		if err != nil {
-			return err
-		}
+// 		fileData = append(fileData, decompressedChunk...)
 
-		// Write the decrypted data to the file
-		_, err = file.Write(decryptedData)
-		if err != nil {
-			return err
-		}
+// 		_, err = conn.Write([]byte(ACK_MSG))
+// 		if err != nil {
+// 			panic(err) // or handle error differently
+// 		}
+// 	}
 
-		// Send back an acknowledgment
-		_, err = conn.WriteToUDP([]byte(ACK_MSG), addr)
-		if err != nil {
-			return err
-		}
-	}
+// 	shardDataChan <- fileData
+// }
 
-	return nil
-}
+func receiveShard(port int, wg *sync.WaitGroup, encryptionKey []byte, shardDataChan chan<- []byte) {
+	defer wg.Done()
 
-func main() {
-	//pprof
-	go func() {
-		// Start a HTTP server that will serve the pprof endpoints.
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
-
-	// Setup UDP listener
 	addr := net.UDPAddr{
-		Port: 12345, // Replace with your listening port
+		Port: port,
 		IP:   net.ParseIP("0.0.0.0"),
 	}
 	conn, err := net.ListenUDP("udp", &addr)
@@ -149,12 +113,100 @@ func main() {
 	}
 	defer conn.Close()
 
-	// Use a key for AES decryption (must match the sender's key)
-	encryptionKey := []byte("1234567890123456") // Must be 16, 24, or 32 bytes long
+	var fileData []byte
+	for {
+		buffer := make([]byte, MAX_PACKET_SIZE)
+		n, _, err := conn.ReadFromUDP(buffer)
+		if err != nil {
+			if err == io.EOF {
+				break // End of shard
+			}
+			panic(err) // or handle error differently
+		}
 
-	// Call receiveFile to start receiving data
-	err = receiveFile(conn, "output.txt", encryptionKey)
+		// Log the size and contents of the received data
+		// fmt.Printf("Received packet: size=%d, contents=%s\n", n, buffer[:n])
+
+		// if n <= aes.BlockSize {
+		// 	fmt.Printf("Received data is too short: %d bytes\n", n)
+		// 	continue // Skip this packet
+		// }
+
+		packet, err := deserialize(buffer[:n])
+		if err != nil {
+			fmt.Println("Failed to deserialize packet:", err)
+			continue // Skip this packet
+		}
+
+		// After deserializing
+		fmt.Printf("Deserialized packet: %+v\n", packet)
+		// After decompressing the data
+		fmt.Printf("SequenceNumber: %d\n", packet.SequenceNumber)
+		// fmt.Printf("Data: %s\n", packet.Data)
+
+		// decryptedChunk, err := decryptData(packet.Data, encryptionKey)
+		// if err != nil {
+		// 	fmt.Println("Failed to decrypt data:", err)
+		// 	continue // Skip this packet
+		// }
+
+		// decompressedChunk, err := decompressWithZstd(decryptedChunk)
+		// if err != nil {
+		// 	fmt.Println("Failed to decompress data:", err)
+		// 	continue // Skip this packet
+		// }
+
+		// fileData = append(fileData, decompressedChunk...)
+		fileData = append(fileData, packet.Data...)
+
+		_, err = conn.Write([]byte(ACK_MSG))
+		if err != nil {
+			// panic(err) // or handle error differently
+			fmt.Println("Failed to send ACK:", err)
+		}
+	}
+
+	shardDataChan <- fileData
+}
+
+func main() {
+
+	// get local ip address
+	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		panic(err)
+	}
+	var localIP string
+	for _, address := range addrs {
+		// check the address type and if it is not a loopback the display it
+		// = ipv4
+		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			localIP = ipnet.IP.String()
+			fmt.Println(localIP)
+		}
+	}
+
+	var wg sync.WaitGroup
+	encryptionKey := []byte("1234567890123456")
+	shardDataChan := make(chan []byte, TOTAL_SHARDS)
+
+	for i := 0; i < TOTAL_SHARDS; i++ {
+		wg.Add(1)
+		go receiveShard(START_PORT+i, &wg, encryptionKey, shardDataChan)
+	}
+
+	go func() {
+		wg.Wait()
+		close(shardDataChan)
+	}()
+
+	outputFile, err := os.Create("received_file")
+	if err != nil {
+		panic(err)
+	}
+	defer outputFile.Close()
+
+	for shardData := range shardDataChan {
+		outputFile.Write(shardData)
 	}
 }

@@ -1,3 +1,6 @@
+# Analyze CPU Profile
+
+
 ```bash
 ➜  go-udp-zstd-file-transfer git:(main) ✗ go tool pprof http://localhost:6060/debug/pprof/profile\?seconds\=45
 Fetching profile over HTTP from http://localhost:6060/debug/pprof/profile?seconds=45
@@ -58,3 +61,33 @@ ROUTINE ======================== syscall.syscall6 in /usr/local/go/src/runtime/s
          .          .     51:
 (pprof) 
 ```
+
+
+The output of the top command from pprof is showing you where your Go application is spending most of its execution time. Here's a brief overview of the top entries and what they generally indicate:
+
+- runtime.pthread_cond_signal: This is a lower-level runtime call that signals a thread condition (used in synchronization). High time spent here might indicate contention or frequent signaling between threads or goroutines.
+
+- syscall.syscall6 and syscall.syscall: These entries suggest that a significant amount of time is being spent making system calls. System calls are typically used for I/O, networking, and inter-process communication. High time in syscalls might indicate I/O or network-related bottlenecks.
+
+- runtime.kevent: This is a system call related to the kernel event notification mechanism. High times here may indicate that the program is spending a lot of time waiting for I/O events, which is common in network servers.
+
+- runtime.pthread_cond_wait: Similar to pthread_cond_signal, this indicates waiting on a condition, which could be a sign of thread/goroutine synchronization or contention issues.
+
+- runtime.pthread_kill: This involves sending a signal to a thread, potentially to interrupt it.
+
+- runtime.madvise: This syscall is typically used to give advice about memory usage patterns.
+
+- runtime.pthread_cond_timedwait_relative_np: A conditional wait with a timeout. Time spent here could indicate that timeouts are being hit frequently.
+
+- encoding/gob.(*Decoder).compileDec: Time spent here indicates that the program is spending time in the encoding/gob package, likely decoding data.
+
+- runtime.heapBitsSetType: Internal runtime function related to memory management and type assignment in the heap.
+
+Based on this profile, if this application is intended to be a network server, it's likely that the synchronization between threads (or goroutines) and the handling of I/O are areas that could be investigated for performance improvements.
+
+To dive deeper into the issue:
+
+You may want to look at the concurrency model and see if there is excessive contention or if synchronization primitives are being used inefficiently.
+Investigate the I/O patterns: Are there ways to reduce system calls, can I/O be batched, or can non-blocking/asynchronous patterns be used more effectively?
+If encoding/gob is showing up and you suspect it's a bottleneck, consider profiling the serialization and deserialization code to understand the performance characteristics. You might want to compare it with other serialization formats like JSON, Protocol Buffers, or MessagePack to see if there's a more efficient option for your use case.
+For more specific analysis, you would typically use the list command with the function name to see which lines of code are taking the most time, or use the web command to see a call graph visualization, which can help identify bottlenecks in the context of the entire program's call structure.
