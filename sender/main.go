@@ -8,23 +8,22 @@ import (
 	"encoding/gob"
 	"fmt"
 	"io"
-	"log"
 	"net"
-	"net/http"
 	"os"
+	"sync"
 	"time"
-
-	_ "net/http/pprof" // Import for side effects
 
 	"github.com/klauspost/compress/zstd"
 )
 
 const (
-	MAX_PACKET_SIZE = 1024 // Adjust based on your network's MTU
+	MAX_PACKET_SIZE = 1024
 	ACK_MSG         = "ACK"
+	// SHARD_SIZE      = 65536     // Size of each shard in bytes
+	SHARD_SIZE = 2     // Size of each shard in bytes
+	START_PORT = 30000 // Starting port for sharding
 )
 
-// Packet represents the data structure to send over the network
 type Packet struct {
 	SequenceNumber int
 	Data           []byte
@@ -36,13 +35,11 @@ func encryptData(data []byte, key []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	// The IV needs to be unique, but not secret
 	iv := make([]byte, aes.BlockSize)
 	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
 		return nil, err
 	}
 
-	// CFB encrypter
 	stream := cipher.NewCFBEncrypter(block, iv)
 	encrypted := make([]byte, len(data))
 	stream.XORKeyStream(encrypted, data)
@@ -51,7 +48,6 @@ func encryptData(data []byte, key []byte) ([]byte, error) {
 }
 
 func compressWithZstd(data []byte) ([]byte, error) {
-	// fast compression level
 	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
 	if err != nil {
 		return nil, err
@@ -71,110 +67,90 @@ func serialize(packet Packet) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func sendFile(conn *net.UDPConn, addr *net.UDPAddr, filename string, encryptionKey []byte) error {
-	file, err := os.Open(filename)
-	if err != nil {
-		return err
+func sendShard(shard []byte, port int, wg *sync.WaitGroup, encryptionKey []byte) {
+	defer wg.Done()
+
+	addr := net.UDPAddr{
+		Port: port,
+		IP:   net.ParseIP("172.19.0.2"), // Adjust as necessary
 	}
-	defer file.Close()
-
-	buffer := make([]byte, MAX_PACKET_SIZE)
-	sequenceNumber := 1
-
-	for {
-		bytesRead, err := file.Read(buffer)
-		if err != nil {
-			if err == io.EOF {
-				break // End of file reached
-			}
-			return err
-		}
-		fileChunk := buffer[:bytesRead]
-
-		// Encrypt and then compress the chunk of data
-		encryptedChunk, err := encryptData(fileChunk, encryptionKey)
-		if err != nil {
-			return err
-		}
-		compressedChunk, err := compressWithZstd(encryptedChunk)
-		if err != nil {
-			return err
-		}
-
-		// Create a packet and serialize it
-		packet := Packet{
-			SequenceNumber: sequenceNumber,
-			Data:           compressedChunk,
-		}
-		serializedPacket, err := serialize(packet)
-		if err != nil {
-			return err
-		}
-
-		// Send the serialized packet
-		_, err = conn.WriteToUDP(serializedPacket, addr)
-		if err != nil {
-			return err
-		}
-
-		// Wait for acknowledgment before sending the next packet
-		ackBuffer := make([]byte, len(ACK_MSG)+10)
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		_, _, err = conn.ReadFromUDP(ackBuffer)
-		if err != nil {
-			// Handle the timeout or error, possibly resending the packet
-			// For the example, let's just retry without backoff (not recommended for production)
-			continue
-		}
-
-		// Increment the sequence number for the next packet
-		sequenceNumber++
-	}
-
-	return nil
-}
-
-func main() {
-	//pprof
-	go func() {
-		// Start a HTTP server that will serve the pprof endpoints.
-		log.Println(http.ListenAndServe("localhost:6061", nil))
-	}()
-
-	serverAddr := "localhost:12345" // The address of the receiver
-	udpAddr, err := net.ResolveUDPAddr("udp", serverAddr)
-	if err != nil {
-		panic(err)
-	}
-
-	localAddr := net.UDPAddr{
-		Port: 0, // Let the system assign a port
-		IP:   net.ParseIP("0.0.0.0"),
-	}
-
-	conn, err := net.ListenUDP("udp", &localAddr)
+	conn, err := net.DialUDP("udp", nil, &addr)
 	if err != nil {
 		panic(err)
 	}
 	defer conn.Close()
 
-	// Use the same key as the receiver for AES encryption
-	encryptionKey := []byte("1234567890123456") // 32 bytes for AES-256
+	sequenceNumber := 1
+	for i := 0; i < len(shard); i += MAX_PACKET_SIZE {
+		end := i + MAX_PACKET_SIZE
+		if end > len(shard) {
+			end = len(shard)
+		}
 
+		fmt.Printf("Original data before encryption: %s\n", shard[i:end])
+
+		// encryptedChunk, _ := encryptData(shard[i:end], encryptionKey)
+		// compressedChunk, _ := compressWithZstd(encryptedChunk)
+
+		packet := Packet{
+			SequenceNumber: sequenceNumber,
+			// Data:           compressedChunk,
+			Data: shard[i:end],
+		}
+		serializedPacket, _ := serialize(packet)
+
+		_, err = conn.Write(serializedPacket)
+		if err != nil {
+			panic(err)
+		}
+
+		// Log the size and contents of the packet before sending
+		// fmt.Printf("Sending packet: size=%d, contents=%s\n", len(serializedPacket), serializedPacket)
+		fmt.Printf("Sending packet: size=%d, \n", len(serializedPacket))
+
+		ackBuffer := make([]byte, len(ACK_MSG)+10)
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, _, err = conn.ReadFromUDP(ackBuffer)
+		if err != nil {
+			continue // handle timeout or error, possibly resending the packet
+		}
+
+		sequenceNumber++
+	}
+}
+
+func main() {
 	if len(os.Args) < 2 {
 		panic("Please provide a filename to send")
 	}
-	fienameFromArgs := os.Args[1]
+	filename := os.Args[1]
 
-	//save current time to calculate time taken
-	start := time.Now()
-
-	err = sendFile(conn, udpAddr, fienameFromArgs, encryptionKey)
+	file, err := os.Open(filename)
 	if err != nil {
 		panic(err)
 	}
+	defer file.Close()
 
-	//calculate time taken
-	elapsed := time.Since(start)
-	fmt.Println("Time taken: ", elapsed)
+	fileInfo, _ := file.Stat()
+	fileSize := fileInfo.Size()
+	totalShards := (fileSize + SHARD_SIZE - 1) / SHARD_SIZE
+
+	var wg sync.WaitGroup
+	encryptionKey := []byte("1234567890123456")
+
+	for i := int64(0); i < totalShards; i++ {
+		start := i * SHARD_SIZE
+		end := start + SHARD_SIZE
+		if end > fileSize {
+			end = fileSize
+		}
+
+		shard := make([]byte, end-start)
+		file.ReadAt(shard, start)
+
+		wg.Add(1)
+		go sendShard(shard, START_PORT+int(i), &wg, encryptionKey)
+	}
+
+	wg.Wait()
 }
