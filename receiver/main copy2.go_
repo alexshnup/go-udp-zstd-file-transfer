@@ -16,13 +16,29 @@ import (
 const (
 	port       = 30000
 	outputPath = "output_file" // Replace with your output file path
+	// receiveTimeout = 20 * time.Second // Timeout after 30 seconds of inactivity
 )
 
 var mutex sync.Mutex // Mutex for synchronizing access to receivedChunks
 
 const numWorkers = 4 // Number of worker goroutines for processing data
 
-func processChunks(workerId int, chunksChan <-chan []byte, receivedChunks map[int][]byte, mutex *sync.Mutex) {
+func processChunksSlow(workerId int, chunksChan <-chan []byte, receivedChunks map[int][]byte, wg *sync.WaitGroup) {
+	for packet := range chunksChan {
+		// Extract sequence number and chunk data
+		splitIndex := bytes.IndexByte(packet, ':')
+		sequence, _ := strconv.Atoi(string(packet[:splitIndex]))
+		chunkData := packet[splitIndex+1:]
+
+		mutex.Lock()
+		receivedChunks[sequence] = chunkData
+		mutex.Unlock()
+		// fmt.Printf("Worker %d received chunk %d\n", workerId, sequence+1)
+		// wg.Done()
+	}
+}
+
+func processChunks(workerId int, chunksChan <-chan []byte, receivedChunks map[int][]byte, mutex *sync.Mutex, wg *sync.WaitGroup) {
 	for packet := range chunksChan {
 		// Extract the sequence number directly from the first 4 bytes
 		sequence := int(binary.BigEndian.Uint32(packet[:4]))
@@ -34,6 +50,7 @@ func processChunks(workerId int, chunksChan <-chan []byte, receivedChunks map[in
 		receivedChunks[sequence] = chunkData
 		mutex.Unlock()
 
+		// wg.Done()
 	}
 }
 
@@ -80,11 +97,12 @@ func main() {
 	totalChunksChan := make(chan int, 1) // Channel to receive totalChunksExpected
 	receivedChunks := make(map[int][]byte)
 	chunksChan := make(chan []byte, 100) // Buffered channel
+	var wg sync.WaitGroup
 
 	// Start worker goroutines
 	for i := 0; i < numWorkers; i++ {
 		fmt.Printf("start worker %d\n", i)
-		go processChunks(i, chunksChan, receivedChunks, &mutex)
+		go processChunks(i, chunksChan, receivedChunks, &mutex, &wg)
 	}
 
 	go func() {
@@ -98,6 +116,7 @@ func main() {
 
 			if bytes.HasPrefix(buffer[:n], []byte("total:")) {
 				totalChunksExpected, _ := strconv.Atoi(string(buffer[6:n]))
+				// wg.Add(totalChunksExpected)
 				totalChunksChan <- totalChunksExpected // Send totalChunksExpected to the main goroutine
 				continue
 			}
@@ -106,6 +125,32 @@ func main() {
 
 		}
 	}()
+
+	// Wait for a bit to allow the receiver to start
+	// time.Sleep(300 * time.Second)
+	// input := bufio.NewScanner(os.Stdin)
+	// input.Scan()
+	// fmt.Println("Receiver started, waiting for data...")
+
+	// 	// Main goroutine waits for all chunks or timeout
+	// 	var sequence int
+	// 	for len(receivedChunks) < totalChunksExpected {
+	// 		select {
+	// 		case <-newChunkChan:
+	// 			// New chunk received, continue waiting
+	// 			if sequence%10 == 0 {
+	// 				log.Printf("\x1b[33m New chunk received  \x1b[35m %d \x1b[0m of \x1b[32m %d  \x1b[0m size= %d\n", sequence+1, totalChunksExpected, len(receivedChunks))
+	// 			}
+	// 			if sequence > totalChunksExpected-10 {
+	// 				log.Printf("\x1b[33m New chunk received  \x1b[35m %d \x1b[0m of \x1b[32m %d  \x1b[0m size= %d\n", sequence+1, totalChunksExpected, len(receivedChunks))
+	// 			}
+	// 		case <-time.After(receiveTimeout):
+	// 			fmt.Println("Timeout reached, stopping reception")
+	// 			goto done
+	// 		}
+	// 		sequence++
+	// 	}
+	// done:
 
 	totalChunksExpected := <-totalChunksChan
 	fmt.Printf("Total chunks expected: %d\n", totalChunksExpected)
@@ -149,3 +194,19 @@ func main() {
 	writer.Flush()
 	fmt.Println("File reassembled")
 }
+
+// // waitTimeout waits for the WaitGroup for the specified max timeout.
+// // Returns true if waiting timed out.
+// func waitTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
+// 	c := make(chan struct{})
+// 	go func() {
+// 		defer close(c)
+// 		wg.Wait()
+// 	}()
+// 	select {
+// 	case <-c:
+// 		return false // Completed normally
+// 	case <-time.After(timeout):
+// 		return true // Timed out
+// 	}
+// }

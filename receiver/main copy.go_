@@ -1,0 +1,157 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	port           = 30000
+	outputPath     = "output_file"    // Replace with your output file path
+	receiveTimeout = 30 * time.Second // Timeout after 30 seconds of inactivity
+)
+
+func main() {
+
+	// get local ip address
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		panic(err)
+	}
+	var localIP string
+	for _, address := range addrs {
+		// check the address type and if it is not a loopback the display it
+		// = ipv4
+		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			localIP = ipnet.IP.String()
+			fmt.Println(localIP)
+		}
+	}
+
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		fmt.Println("Error resolving UDP address:", err)
+		return
+	}
+
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		fmt.Println("Error listening on UDP:", err)
+		return
+	}
+	defer conn.Close()
+
+	file, err := os.Create(outputPath)
+	if err != nil {
+		fmt.Println("Error creating file:", err)
+		return
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+	defer writer.Flush()
+
+	buffer := make([]byte, 2048)
+	// receivedChunks := make(map[int][]byte)
+	totalChunksExpected := 0 // initialize to zero
+	var wg sync.WaitGroup
+	controlMessageReceived := false
+
+	// for {
+	// 	n, _, err := conn.ReadFromUDP(buffer)
+	// 	if err != nil {
+	// 		fmt.Println("Error reading UDP message:", err)
+	// 		return
+	// 	}
+
+	// 	packet := string(buffer[:n])
+	// 	if strings.HasPrefix(packet, "total:") {
+	// 		totalChunksExpected, _ = strconv.Atoi(packet[6:])
+	// 		log.Printf("Total chunks expected: %d\n", totalChunksExpected)
+	// 		continue
+	// 	}
+
+	// 	splitIndex := strings.Index(packet, ":")
+	// 	sequence, _ := strconv.Atoi(packet[:splitIndex])
+	// 	// chunkData := buffer[splitIndex+1 : n]
+
+	// 	// Create a copy of the chunk data
+	// 	chunkData := make([]byte, n-splitIndex-1)
+	// 	copy(chunkData, buffer[splitIndex+1:n])
+
+	// 	receivedChunks[sequence] = chunkData
+
+	// 	if sequence%1000 == 0 {
+	// 		log.Printf("\x1b[33m Received chunk \x1b[35m  %d \x1b[0m of %d sizeMAP=%d\n", sequence+1, totalChunksExpected, len(receivedChunks))
+	// 	}
+
+	// 	if sequence > totalChunksExpected-10 {
+	// 		log.Printf("\x1b[33m Received chunk \x1b[35m  %d \x1b[0m of %d sizeMAP=%d\n", sequence+1, totalChunksExpected, len(receivedChunks))
+	// 	}
+
+	// 	if len(receivedChunks) == totalChunksExpected {
+	// 		fmt.Println("break")
+	// 		break
+	// 	}
+	// }
+
+	go func() {
+		for {
+			n, _, err := conn.ReadFromUDP(buffer)
+			if err != nil {
+				log.Println("Error reading UDP message:", err)
+				return
+			}
+
+			packet := string(buffer[:n])
+			log.Printf("Packet received: %s", packet) // Log every packet received
+
+			if strings.HasPrefix(packet, "total:") {
+				totalChunksExpected, _ = strconv.Atoi(packet[6:])
+				log.Printf("Total chunks expected: %d\n", totalChunksExpected)
+				wg.Add(totalChunksExpected)
+				controlMessageReceived = true
+				continue
+			}
+
+			// ... rest of the chunk processing code ...
+		}
+	}()
+
+	fmt.Println("Receiver started, waiting for data...")
+
+	if controlMessageReceived {
+		if waitTimeout(&wg, receiveTimeout) {
+			fmt.Println("Timeout reached, stopping reception")
+		} else {
+			fmt.Println("All chunks received")
+		}
+	} else {
+		fmt.Println("Control message not received, exiting.")
+	}
+
+	// ... Reassemble and write the file logic ...
+}
+
+// waitTimeout waits for the WaitGroup for the specified max timeout.
+// Returns true if waiting timed out.
+func waitTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
+	c := make(chan struct{})
+	go func() {
+		defer close(c)
+		wg.Wait()
+	}()
+	select {
+	case <-c:
+		return false // Completed normally
+	case <-time.After(timeout):
+		return true // Timed out
+	}
+}

@@ -1,5 +1,3 @@
-module go-udp-zstd-file-transfer
+module receiver
 
 go 1.21.2
-
-require github.com/klauspost/compress v1.17.2
