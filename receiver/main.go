@@ -22,18 +22,16 @@ var mutex sync.Mutex // Mutex for synchronizing access to receivedChunks
 
 const numWorkers = 4 // Number of worker goroutines for processing data
 
-func processChunks(workerId int, chunksChan <-chan []byte, receivedChunks map[int][]byte, mutex *sync.Mutex) {
+func processChunks(chunksChan <-chan []byte, readyToWriteChan chan<- int, receivedChunks map[int][]byte, mutex *sync.Mutex) {
 	for packet := range chunksChan {
-		// Extract the sequence number directly from the first 4 bytes
 		sequence := int(binary.BigEndian.Uint32(packet[:4]))
-
-		// Extract the chunk data
 		chunkData := packet[4:]
 
 		mutex.Lock()
 		receivedChunks[sequence] = chunkData
 		mutex.Unlock()
 
+		readyToWriteChan <- sequence // Notify that a new chunk is ready
 	}
 }
 
@@ -79,13 +77,17 @@ func main() {
 
 	totalChunksChan := make(chan int, 1) // Channel to receive totalChunksExpected
 	receivedChunks := make(map[int][]byte)
-	chunksChan := make(chan []byte, 100) // Buffered channel
+	chunksChan := make(chan []byte, 100)    // Buffered channel
+	readyToWriteChan := make(chan int, 100) // For notifying chunks ready to write
 
-	// Start worker goroutines
-	for i := 0; i < numWorkers; i++ {
-		fmt.Printf("start worker %d\n", i)
-		go processChunks(i, chunksChan, receivedChunks, &mutex)
-	}
+	// Start a single goroutine for processing chunks
+	go processChunks(chunksChan, readyToWriteChan, receivedChunks, &mutex)
+
+	// // Start worker goroutines
+	// for i := 0; i < numWorkers; i++ {
+	// 	fmt.Printf("start worker %d\n", i)
+	// 	go processChunks(i, chunksChan, receivedChunks, &mutex)
+	// }
 
 	go func() {
 		for {
@@ -110,35 +112,69 @@ func main() {
 	totalChunksExpected := <-totalChunksChan
 	fmt.Printf("Total chunks expected: %d\n", totalChunksExpected)
 
-	// print size of map
-
-	log.Println("Waiting for receiver to start...")
-	prevSize := 0
-	prevCount := 10
+	lowestUnwrittenChunk := 0
 	for {
-		log.Printf("\x1b[33m Size of map: \x1b[35m  %d \x1b[0m of %d\n", len(receivedChunks), totalChunksExpected)
-		if len(receivedChunks) == totalChunksExpected {
-			break
+		select {
+		case sequence := <-readyToWriteChan:
+			mutex.Lock()
+			for {
+				chunk, exists := receivedChunks[lowestUnwrittenChunk]
+				if !exists {
+					break // No contiguous chunk available
+				}
+				writer.Write(chunk) // Write the chunk
+				delete(receivedChunks, lowestUnwrittenChunk)
+				lowestUnwrittenChunk++
+			}
+			// fmt.Printf("Lowest unwritten chunk: %d sequence: %d\n", lowestUnwrittenChunk, sequence)
+			mutex.Unlock()
+			if sequence == totalChunksExpected-1 {
+				fmt.Println("Last chunk received")
+				goto Assemble
+			}
+		case <-time.After(10 * time.Second):
+			log.Println("Timeout reached, stopping reception")
+			goto Assemble
 		}
-		if len(receivedChunks) == prevSize {
-			prevCount--
+
+		if lowestUnwrittenChunk >= totalChunksExpected {
+			break // All chunks written
 		}
-		if prevCount == 0 {
-			break
-		}
-		prevSize = len(receivedChunks)
-		time.Sleep(1 * time.Second)
 	}
+
+Assemble:
+	writer.Flush()
+	log.Println("File reassembled")
+
+	// // print size of map
+
+	// log.Println("Waiting for receiver to start...")
+	// prevSize := 0
+	// prevCount := 10
+	// for {
+	// 	log.Printf("\x1b[33m Size of map: \x1b[35m  %d \x1b[0m of %d\n", len(receivedChunks), totalChunksExpected)
+	// 	if len(receivedChunks) == totalChunksExpected {
+	// 		break
+	// 	}
+	// 	if len(receivedChunks) == prevSize {
+	// 		prevCount--
+	// 	}
+	// 	if prevCount == 0 {
+	// 		break
+	// 	}
+	// 	prevSize = len(receivedChunks)
+	// 	time.Sleep(1 * time.Second)
+	// }
 
 	missedChunks := 0
 
 	// Reassemble and write the file
 	for i := 0; i < totalChunksExpected; i++ {
-		if chunk, ok := receivedChunks[i]; ok {
-			if totalChunksExpected > 10 && i%(totalChunksExpected/10) == 0 {
-				log.Printf("\x1b[33m Writing chunk: \x1b[35m  %d \x1b[0m of %d\n", i+1, totalChunksExpected)
-			}
-			writer.Write(chunk)
+		if _, ok := receivedChunks[i]; ok {
+			// if totalChunksExpected > 10 && i%(totalChunksExpected/10) == 0 {
+			// 	// log.Printf("\x1b[33m Writing chunk: \x1b[35m  %d \x1b[0m of %d\n", i+1, totalChunksExpected)
+			// }
+			// writer.Write(chunk)
 		} else {
 			missedChunks++
 			// fmt.Printf("Missing chunk: %d of %d\n", i+1, totalChunksExpected)
@@ -146,6 +182,6 @@ func main() {
 	}
 	fmt.Printf("Missed chunks: %d\n", missedChunks)
 
-	writer.Flush()
-	fmt.Println("File reassembled")
+	// writer.Flush()
+	// fmt.Println("File reassembled")
 }

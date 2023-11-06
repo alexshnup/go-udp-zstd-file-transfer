@@ -1,125 +1,79 @@
 package main
 
 import (
-	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"encoding/gob"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
-	"sync"
 	"time"
-
-	"github.com/klauspost/compress/zstd"
 )
 
 const (
-	MAX_PACKET_SIZE = 1024
-	ACK_MSG         = "ACK"
-	// SHARD_SIZE      = 65536     // Size of each shard in bytes
-	SHARD_SIZE = 2     // Size of each shard in bytes
-	START_PORT = 30000 // Starting port for sharding
+	port         = 30000
+	maxChunkSize = 1024 // Maximum size of each chunk
 )
 
-type Packet struct {
-	SequenceNumber int
-	Data           []byte
-}
+var serverIP string
 
-func encryptData(data []byte, key []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
+func sendChunkStringSequence(serverAddr string, chunk []byte, sequence int, totalChans int) {
+	conn, err := net.Dial("udp", serverAddr)
 	if err != nil {
-		return nil, err
-	}
-
-	iv := make([]byte, aes.BlockSize)
-	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
-		return nil, err
-	}
-
-	stream := cipher.NewCFBEncrypter(block, iv)
-	encrypted := make([]byte, len(data))
-	stream.XORKeyStream(encrypted, data)
-
-	return append(iv, encrypted...), nil
-}
-
-func compressWithZstd(data []byte) ([]byte, error) {
-	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
-	if err != nil {
-		return nil, err
-	}
-	defer encoder.Close()
-
-	return encoder.EncodeAll(data, nil), nil
-}
-
-func serialize(packet Packet) ([]byte, error) {
-	var buf bytes.Buffer
-	encoder := gob.NewEncoder(&buf)
-	err := encoder.Encode(packet)
-	if err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func sendShard(shard []byte, port int, wg *sync.WaitGroup, encryptionKey []byte) {
-	defer wg.Done()
-
-	addr := net.UDPAddr{
-		Port: port,
-		IP:   net.ParseIP("172.19.0.2"), // Adjust as necessary
-	}
-	conn, err := net.DialUDP("udp", nil, &addr)
-	if err != nil {
-		panic(err)
+		fmt.Println("Error dialing:", err)
+		return
 	}
 	defer conn.Close()
 
-	sequenceNumber := 1
-	for i := 0; i < len(shard); i += MAX_PACKET_SIZE {
-		end := i + MAX_PACKET_SIZE
-		if end > len(shard) {
-			end = len(shard)
-		}
-
-		fmt.Printf("Original data before encryption: %s\n", shard[i:end])
-
-		// encryptedChunk, _ := encryptData(shard[i:end], encryptionKey)
-		// compressedChunk, _ := compressWithZstd(encryptedChunk)
-
-		packet := Packet{
-			SequenceNumber: sequenceNumber,
-			// Data:           compressedChunk,
-			Data: shard[i:end],
-		}
-		serializedPacket, _ := serialize(packet)
-
-		_, err = conn.Write(serializedPacket)
-		if err != nil {
-			panic(err)
-		}
-
-		// Log the size and contents of the packet before sending
-		// fmt.Printf("Sending packet: size=%d, contents=%s\n", len(serializedPacket), serializedPacket)
-		fmt.Printf("Sending packet: size=%d, \n", len(serializedPacket))
-
-		ackBuffer := make([]byte, len(ACK_MSG)+10)
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		_, _, err = conn.ReadFromUDP(ackBuffer)
-		if err != nil {
-			continue // handle timeout or error, possibly resending the packet
-		}
-
-		sequenceNumber++
+	data := append([]byte(fmt.Sprintf("%d:", sequence)), chunk...)
+	_, err = conn.Write(data)
+	if err != nil {
+		fmt.Println("Error sending data:", err)
+		return
 	}
+	if sequence == totalChans-1 {
+		time.Sleep(10 * time.Second)
+	}
+	// fmt.Printf("\x1b[32mSent chunk\x1b[0m %d %s\n", sequence, data)
+}
+
+func sendChunk(serverAddr string, chunk []byte, sequence int, totalChans int) {
+	conn, err := net.Dial("udp", serverAddr)
+	if err != nil {
+		fmt.Println("Error dialing:", err)
+		return
+	}
+	defer conn.Close()
+
+	// Prepare a 4-byte buffer to hold the sequence number
+	seqBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(seqBuf, uint32(sequence)) // Encode sequence number as 4 bytes
+
+	// Append the sequence buffer and the chunk data
+	data := append(seqBuf, chunk...)
+
+	_, err = conn.Write(data)
+	if err != nil {
+		fmt.Println("Error sending data:", err)
+		return
+	}
+
+	// if sequence == totalChans-1 {
+	// 	time.Sleep(10 * time.Second)
+	// }
+	// fmt.Printf("Sent chunk %d\n", sequence)
 }
 
 func main() {
+
+	//get ip from hostname
+	ip, err := net.LookupIP("receiver")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("IP: %v\n", ip[0])
+	serverIP = fmt.Sprintf("%v", ip[0])
+
 	if len(os.Args) < 2 {
 		panic("Please provide a filename to send")
 	}
@@ -127,30 +81,61 @@ func main() {
 
 	file, err := os.Open(filename)
 	if err != nil {
-		panic(err)
+		fmt.Println("Error opening file:", err)
+		return
 	}
 	defer file.Close()
 
 	fileInfo, _ := file.Stat()
 	fileSize := fileInfo.Size()
-	totalShards := (fileSize + SHARD_SIZE - 1) / SHARD_SIZE
-
-	var wg sync.WaitGroup
-	encryptionKey := []byte("1234567890123456")
-
-	for i := int64(0); i < totalShards; i++ {
-		start := i * SHARD_SIZE
-		end := start + SHARD_SIZE
-		if end > fileSize {
-			end = fileSize
-		}
-
-		shard := make([]byte, end-start)
-		file.ReadAt(shard, start)
-
-		wg.Add(1)
-		go sendShard(shard, START_PORT+int(i), &wg, encryptionKey)
+	totalChunks := int(fileSize / maxChunkSize)
+	if fileSize%maxChunkSize != 0 {
+		totalChunks++
 	}
 
-	wg.Wait()
+	log.Printf("Total chunks: %d\n", totalChunks)
+
+	serverAddr := fmt.Sprintf("%s:%d", serverIP, port)
+	conn, err := net.Dial("udp", serverAddr)
+	if err != nil {
+		fmt.Println("Error dialing:", err)
+		return
+	}
+	_, err = conn.Write([]byte(fmt.Sprintf("total:%d", totalChunks)))
+	if err != nil {
+		fmt.Println("Error sending control message:", err)
+		return
+	}
+	conn.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	buffer := make([]byte, maxChunkSize)
+	sequence := 0
+	for {
+		bytesRead, err := file.Read(buffer)
+		if err != nil {
+			if err == io.EOF {
+				break // End of file reached
+			}
+			fmt.Println("Error reading from file:", err)
+			return
+		}
+
+		if totalChunks > 10 && sequence%(totalChunks/10) == 0 {
+			log.Printf("\x1b[33m Sending chunk \x1b[35m  %d \x1b[0m of %d\n", sequence+1, totalChunks)
+		}
+
+		// if sequence > totalChunks-10 {
+		// 	log.Printf("\x1b[33m Sending chunk \x1b[35m  %d \x1b[0m of %d\n", sequence+1, totalChunks)
+		// }
+
+		sendChunk(serverAddr, buffer[:bytesRead], sequence, totalChunks)
+		// time.Sleep(10 * time.Millisecond)
+		sequence++
+
+	}
+
+	// fmt.Println("All chunks sent")
+
 }
