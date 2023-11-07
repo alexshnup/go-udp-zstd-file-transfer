@@ -17,26 +17,6 @@ const (
 
 var serverIP string
 
-func sendChunkStringSequence(serverAddr string, chunk []byte, sequence int, totalChans int) {
-	conn, err := net.Dial("udp", serverAddr)
-	if err != nil {
-		fmt.Println("Error dialing:", err)
-		return
-	}
-	defer conn.Close()
-
-	data := append([]byte(fmt.Sprintf("%d:", sequence)), chunk...)
-	_, err = conn.Write(data)
-	if err != nil {
-		fmt.Println("Error sending data:", err)
-		return
-	}
-	if sequence == totalChans-1 {
-		time.Sleep(10 * time.Second)
-	}
-	// fmt.Printf("\x1b[32mSent chunk\x1b[0m %d %s\n", sequence, data)
-}
-
 func sendChunk(serverAddr string, chunk []byte, sequence int, totalChans int) {
 	conn, err := net.Dial("udp", serverAddr)
 	if err != nil {
@@ -122,6 +102,8 @@ func main() {
 			return
 		}
 
+		// log.Printf("\x1b[33m Sending chunk \x1b[35m  %d \x1b[0m of %d\n", sequence+1, totalChunks)
+
 		if totalChunks > 10 && sequence%(totalChunks/10) == 0 {
 			log.Printf("\x1b[33m Sending chunk \x1b[35m  %d \x1b[0m of %d\n", sequence+1, totalChunks)
 		}
@@ -129,12 +111,19 @@ func main() {
 		// if sequence > totalChunks-10 {
 		// 	log.Printf("\x1b[33m Sending chunk \x1b[35m  %d \x1b[0m of %d\n", sequence+1, totalChunks)
 		// }
+		outData := make([]byte, maxChunkSize)
+		copy(outData, buffer[:bytesRead])
+		// outData := append([]byte(fmt.Sprintf("%d:", sequence)), buffer[:bytesRead]...)
 
-		sendChunk(serverAddr, buffer[:bytesRead], sequence, totalChunks)
-		// time.Sleep(10 * time.Millisecond)
+		// go sendChunk(serverAddr, buffer[:bytesRead], sequence, totalChunks)
+		sendChunk(serverAddr, outData, sequence, totalChunks)
+		// time.Sleep(1 * time.Microsecond)
+		// time.Sleep(1 * time.Millisecond)
+		// time.Sleep(1 * time.Second)
 		sequence++
 
 	}
+	time.Sleep(2 * time.Second)
 
 	// fmt.Println("All chunks sent")
 
